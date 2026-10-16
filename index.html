@@ -1,0 +1,383 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Cloudy's SoT War Room v8.0</title>
+<style>
+:root{color-scheme:dark}body{margin:0;background:#0b0d10;color:#eee;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+.wrap{max-width:920px;margin:32px auto;padding:0 18px}.card{background:#15181d;border:1px solid #303640;border-radius:14px;padding:22px;margin:14px 0}
+h1{margin:0 0 5px}.sub,small{color:#9aa3af}label{display:block;font-weight:750;margin:13px 0 6px}
+input{width:100%;box-sizing:border-box;background:#0b0d10;color:#fff;border:1px solid #3a424e;border-radius:9px;padding:12px}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}button{width:100%;margin-top:18px;padding:14px;border:0;border-radius:10px;background:#ad252d;color:#fff;font-size:16px;font-weight:850;cursor:pointer}
+button:disabled{opacity:.5}pre{white-space:pre-wrap;word-break:break-word;background:#090b0e;border:1px solid #272d35;border-radius:9px;padding:14px;max-height:520px;overflow:auto}
+</style>
+</head><body><div class="wrap">
+<div class="card">
+<h1>☠ Cloudy's SoT War Room v8.0</h1>
+<div class="sub">SoT War Room — pre-war deep scan: Torn history + FFScouter Premium + KAL saved loadouts/history.</div>
+<label>Temporary / limited Torn API key</label><input id="key" type="password" autocomplete="off" placeholder="Paste Torn key">
+<label>FFScouter Premium API key</label><input id="ffkey" type="password" autocomplete="off" placeholder="Paste registered FFScouter key">
+<label>KAL-connected public Torn API key</label><input id="kalkey" type="password" autocomplete="off" placeholder="Paste the public Torn key connected in KAL">
+<small>All credentials stay in browser memory for the scan and are stripped from the downloaded JSON.</small>
+<div class="row">
+<div><label>SoT faction ID</label><input id="ours" value="41259"></div>
+<div><label>Opponent faction ID</label><input id="theirs" value="54168"></div>
+</div>
+<div class="row">
+<div><label>Completed wars per faction</label><input id="warCount" type="number" min="1" max="20" value="6"></div>
+<div><label>Delay per Torn API request (ms)</label><input id="delay" type="number" min="700" max="5000" value="1100"></div>
+</div>
+<div class="row">
+<div><label>KAL distinct loadouts per opponent</label><input id="kalHistory" type="number" min="1" max="10" value="3"></div>
+<div><label>KAL request delay (ms)</label><input id="kalDelay" type="number" min="250" max="5000" value="500"></div>
+</div>
+<div class="row"><div><label>FF stat-history priority per faction (activity collects EVERY member)</label><input id="ffDeepCount" type="number" min="0" max="100" value="25"></div><div><label>FF activity days</label><input id="ffActivityDays" type="number" min="1" max="30" value="14"></div></div><div id="bridgeState" style="margin-top:16px;padding:10px;border:1px solid #3a424e;border-radius:9px;font-weight:800">KAL Bridge: checking…</div><button id="go">Build Bulk War Intel Export</button>
+<p><small>Torn history uses attacksfull bulk mode. FFScouter is batched. KAL requests are relayed through the Cloudy KAL Bridge userscript to avoid browser CORS. Install/enable the bridge before scanning. Missing intel is recorded, not fatal.</small></p>
+</div>
+<div class="card">
+<strong>🔴 Live War Watch</strong>
+<div class="sub">Lightweight incremental collection during the active ranked war. Load a Deep Scan first to seed FFScouter, KAL and historical production into the command model.</div>
+<label>Deep Scan baseline JSON (recommended)</label><input id="baselineFile" type="file" accept=".json,application/json">
+<div id="baselineState" style="margin-top:8px"><small>No baseline loaded — live-only scoring will still work.</small></div>
+<div class="row"><div><label>Show targets for SoT member ID</label><input id="targetMemberId" type="number" value="4315564"></div><div><label>Ranking objective</label><input value="Win probability × expected respect" disabled></div></div>
+<div class="row">
+<div><label>Live snapshot interval (minutes)</label><input id="liveMinutes" type="number" min="2" max="60" value="5"></div>
+<div><label>War ID</label><input id="liveWarId" type="number" value="50768"></div>
+</div>
+<div class="row"><button id="liveStart">🔴 START LIVE WAR WATCH</button><button id="liveStop" disabled>■ STOP + EXPORT LIVE JSON</button></div><button id="simWar" style="background:#39424e">🧪 SIMULATE WAR INTEL</button>
+<div id="liveSummary" style="margin-top:14px;padding:12px;background:#090b0e;border:1px solid #272d35;border-radius:9px">Live watch idle.</div>
+<div id="commandBoard" style="margin-top:14px"></div>
+</div>
+<div class="card"><strong>Status</strong><pre id="status">Ready.</pre></div>
+</div>
+<script>
+const API="https://api.torn.com/v2", $=x=>document.getElementById(x);
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+let lastReq=0, reqNo=0, DELAY=1100;
+function log(x){$("status").textContent+=($("status").textContent?"\n":"")+x;$("status").scrollTop=$("status").scrollHeight}
+async function req(path,key){
+ for(let attempt=0;attempt<5;attempt++){
+   const wait=DELAY-(Date.now()-lastReq); if(wait>0) await sleep(wait);
+   lastReq=Date.now(); reqNo++;
+   const sep=path.includes("?")?"&":"?";
+   log(`  API #${reqNo}`);
+   const r=await fetch(`${API}${path}${sep}key=${encodeURIComponent(key)}`,{headers:{Accept:"application/json"}});
+   const txt=await r.text(); let j;
+   try{j=JSON.parse(txt)}catch{throw Error(`HTTP ${r.status}: ${txt.slice(0,180)}`)}
+   const code=Number(j?.error?.code||0);
+   if(code===5||r.status===429){
+     const cool=65000+attempt*15000;
+     log(`  ⏳ RATE LIMIT — cooling ${Math.round(cool/1000)}s, then retrying`);
+     await sleep(cool); continue;
+   }
+   if(!r.ok||j.error) throw Error(JSON.stringify(j.error||j));
+   return j;
+ }
+ throw Error("Rate limit persisted after retries.");
+}
+async function opt(path,key,label){
+ try{const data=await req(path,key);log(`✓ ${label}`);return{ok:true,data}}
+ catch(e){log(`⚠ ${label}: ${e.message}`);return{ok:false,error:e.message}}
+}
+function wars(x){return x?.data?.rankedwars||x?.rankedwars||[]}
+function aid(a){return String(a?.id ?? a?.code ?? `${a?.ended}-${a?.attacker?.id??a?.attacker_id}-${a?.defender?.id??a?.defender_id}`)}
+function ended(a){return Number(a?.ended||0)}
+function factionId(side){return Number(side?.faction?.id ?? side?.faction_id ?? 0)}
+function matchup(a,x,y){const af=factionId(a?.attacker),df=factionId(a?.defender);return(af===x&&df===y)||(af===y&&df===x)}
+async function bulkWindow(from,to,key,label){
+ const map=new Map();let cursor=Number(from),page=0,stagnant=0,errors=[];
+ while(cursor<=to&&page<100){
+  page++;let j;try{j=await req(`/faction/attacksfull?limit=1000&sort=ASC&from=${cursor}&to=${to}`,key)}catch(e){errors.push(e.message);break}
+  const arr=j.attacks||[];let added=0,maxEnd=cursor;
+  for(const a of arr){const id=aid(a);if(!map.has(id)){map.set(id,a);added++}maxEnd=Math.max(maxEnd,ended(a))}
+  log(`  ${label}: bulk ${page} → ${arr.length} returned / ${added} new / ${map.size} total`);
+  if(arr.length===0||arr.length<1000)break;
+  if(maxEnd<=cursor){stagnant++;if(stagnant>=2){errors.push("No timestamp progress; stopped to prevent request loop.");break}cursor++}else{stagnant=0;cursor=maxEnd}
+ }
+ return{ok:errors.length===0||map.size>0,pages:page,errors,attacks:[...map.values()]};
+}
+function sanitizeCredentialEchoes(value){
+ if(Array.isArray(value))return value.map(sanitizeCredentialEchoes);
+ if(!value||typeof value!=="object")return value;
+ const out={};for(const[k,v]of Object.entries(value)){const n=k.toLowerCase().replace(/[^a-z0-9]/g,"");if(["key","apikey","apikeyvalue","token","authorization","secret"].includes(n))continue;out[k]=sanitizeCredentialEchoes(v)}return out;
+}
+const KALAPI="https://api.kalends.dev",KAL_SCRIPT_VERSION="1.2.9";let KAL_DELAY=500,kalLastReq=0,kalReqNo=0;
+function kalBridgeReq(url,timeoutMs=30000){
+ return new Promise((resolve,reject)=>{
+  const requestId=`kal-${Date.now()}-${Math.random().toString(36).slice(2)}`;let done=false;
+  const responseEvent="cloudy-kal-response-"+requestId;
+  const cleanup=()=>{document.removeEventListener(responseEvent,onResponse);clearTimeout(timer)};
+  const onResponse=ev=>{const d=ev.detail||{};done=true;cleanup();if(d.error)reject(Error(d.error));else resolve(d)};
+  document.addEventListener(responseEvent,onResponse,{once:true});
+  const timer=setTimeout(()=>{if(done)return;cleanup();reject(Error("KAL bridge not detected. Update/enable Cloudy's KAL Bridge userscript and refresh this page."))},timeoutMs);
+  document.dispatchEvent(new CustomEvent("cloudy-kal-request",{detail:{requestId,url,responseEvent}}));
+ });
+}
+function bridgePing(timeoutMs=1500){
+ return new Promise(resolve=>{
+  const id=`ping-${Date.now()}-${Math.random().toString(36).slice(2)}`,evt="cloudy-kal-pong-"+id;
+  const done=v=>{document.removeEventListener(evt,on);clearTimeout(t);resolve(v)},on=()=>done(true);
+  document.addEventListener(evt,on,{once:true});
+  const t=setTimeout(()=>done(false),timeoutMs);
+  document.dispatchEvent(new CustomEvent("cloudy-kal-ping",{detail:{responseEvent:evt}}));
+ });
+}
+async function refreshBridgeState(){
+ const el=$("bridgeState"),ok=await bridgePing();
+ el.textContent=ok?"KAL Bridge: CONNECTED ✓":"KAL Bridge: NOT DETECTED ✗ — update/install bridge, then refresh";
+ el.style.borderColor=ok?"#238636":"#ad252d";return ok;
+}
+setTimeout(refreshBridgeState,250);
+async function kalReq(path,kalkey){
+ for(let attempt=0;attempt<5;attempt++){
+  const wait=KAL_DELAY-(Date.now()-kalLastReq);if(wait>0)await sleep(wait);kalLastReq=Date.now();kalReqNo++;
+  const url=new URL(`${KALAPI}${path}`);url.searchParams.set("key",kalkey);url.searchParams.set("version",KAL_SCRIPT_VERSION);
+  let br;try{br=await kalBridgeReq(url.href)}catch(e){throw Error(`KAL bridge error: ${e.message}`)}
+  const status=Number(br.status||0),txt=br.responseText||"";let j=null;try{j=txt?JSON.parse(txt):null}catch{}
+  if(status===429||status===408||status>=500){const rh=Number(br.retryAfter||0),sec=Number.isFinite(rh)&&rh>0?rh:Math.min(30,3*(attempt+1));log(`  ⏳ KAL ${status||"retry"} — waiting ${sec}s`);await sleep(sec*1000);continue}
+  if(status===404)return{status:"missing",data:null};if(status===426)throw Error("KAL requires a newer Loadout Revealer version/API contract.");if(status===401)throw Error("KAL did not recognize this connected public Torn key.");if(status===403)throw Error("KAL key is not allowed to use this feature.");if(status<200||status>=300)throw Error(j?.error||`KAL HTTP ${status||"unknown"}`);
+  return{status:"ok",data:sanitizeCredentialEchoes(j)};
+ }throw Error("KAL request failed after retries.");
+}
+function memberArray(coreEntry){return coreEntry?.ok?(coreEntry?.data?.members||[]):[]}
+async function collectKALIntel(kalkey,core,theirs,maxHistory){
+ if(!kalkey)return{enabled:false,error:"No KAL-connected key supplied"};const opponentMembers=memberArray(core.opponent_members),members=[];let found=0,missing=0,failed=0,historyCaptures=0;
+ log(`\nKAL: scanning ${opponentMembers.length} opponent members; up to ${maxHistory} distinct loadouts each...`);
+ for(let i=0;i<opponentMembers.length;i++){const m=opponentMembers[i],id=Number(m.id);log(`  KAL [${i+1}/${opponentMembers.length}] ${m.name} [${id}]`);const row={id,name:m.name,level:m.level,status:"unknown",loadouts:[],error:null};
+  try{let res=await kalReq(`/script/profile-loadout?target=${id}&include_job_specials=true`,kalkey);if(res.status==="missing"){row.status="missing";missing++;members.push(row);continue}let cur=res.data;
+   for(let h=0;h<maxHistory&&cur;h++){row.loadouts.push(cur);historyCaptures++;if(cur.has_previous!==true||!cur.history_cursor||h+1>=maxHistory)break;res=await kalReq(`/script/profile-loadout?target=${id}&before=${encodeURIComponent(cur.history_cursor)}&include_job_specials=false`,kalkey);if(res.status!=="ok")break;cur=res.data}
+   row.status="ok";found++;
+  }catch(e){row.status="error";row.error=e.message;failed++;log(`    ⚠ ${e.message}`)}members.push(row)}
+ return{enabled:true,source:"KAL - Loadout Revealer",source_version:KAL_SCRIPT_VERSION,faction_id:theirs,requested:opponentMembers.length,found,missing,failed,history_captures:historyCaptures,max_distinct_loadouts_per_member:maxHistory,members};
+}
+const FFAPI="https://ffscouter.com/api/v1";
+async function ffReq(path,ffkey){
+ for(let attempt=0;attempt<5;attempt++){const sep=path.includes("?")?"&":"?";const r=await fetch(`${FFAPI}${path}${sep}key=${encodeURIComponent(ffkey)}`,{headers:{Accept:"application/json"}});const txt=await r.text();let j;try{j=JSON.parse(txt)}catch{throw Error(`FFScouter HTTP ${r.status}: ${txt.slice(0,180)}`)}const code=Number(j?.code||0);if(r.status===429||code===20||code===21){const sec=Math.max(3,Number(j?.retry_after_seconds)||15);log(`  ⏳ FFScouter rate limit — waiting ${sec}s`);await sleep(sec*1000);continue}if(!r.ok||(code&&code!==0))throw Error(j?.error||JSON.stringify(j));return j}throw Error("FFScouter rate limit persisted after retries.");
+}
+async function ffOptional(path,ffkey,label){try{const data=await ffReq(path,ffkey);log(`✓ ${label}`);return{ok:true,data}}catch(e){log(`⚠ ${label}: ${e.message}`);return{ok:false,error:e.message}}}
+async function collectFFIntel(ffkey,core,ours,theirs){
+ if(!ffkey)return{enabled:false,error:"No FFScouter key supplied"};log("\nChecking FFScouter key...");const raw=await ffOptional("/check-key",ffkey,"FFScouter key status"),keyStatus=raw.ok?{ok:true,data:sanitizeCredentialEchoes(raw.data)}:raw;
+ const om=memberArray(core.opponent_members),sm=memberArray(core.sot_members),oi=om.map(m=>Number(m.id)).filter(Boolean),si=sm.map(m=>Number(m.id)).filter(Boolean);
+ async function batch(ids,label){const all=[],CHUNK=75;for(let i=0;i<ids.length;i+=CHUNK){const c=ids.slice(i,i+CHUNK),d=await ffOptional(`/get-stats?targets=${c.join(",")}`,ffkey,`${label} FF stats ${i+1}-${Math.min(i+CHUNK,ids.length)}`);if(d.ok){const rows=Array.isArray(d.data)?d.data:(d.data?.results||d.data?.stats||[]);all.push(...rows)}if(i+CHUNK<ids.length)await sleep(600)}return all}
+ const os=await batch(oi,"Opponent"),ss=await batch(si,"SoT"),by=rows=>Object.fromEntries(rows.map(x=>[String(x.player_id),x])),o=by(os),s=by(ss);
+ const deepCount=Math.max(0,Math.min(100,Number($("ffDeepCount").value)||0));
+ const activityDays=Math.max(1,Math.min(30,Number($("ffActivityDays").value)||14));
+ const priority=[...om,...sm].filter(m=>Number(m.id)>0);
+ const playerDeep={},deepEnd=Math.floor(Date.now()/900)*900,deepStart=deepEnd-activityDays*86400;
+ const topOpp=new Set([...om].sort((a,b)=>Number(o[String(b.id)]?.bs_estimate||0)-Number(o[String(a.id)]?.bs_estimate||0)).slice(0,deepCount).map(m=>Number(m.id)));
+ const topSot=new Set([...sm].sort((a,b)=>Number(s[String(b.id)]?.bs_estimate||0)-Number(s[String(a.id)]?.bs_estimate||0)).slice(0,deepCount).map(m=>Number(m.id)));
+ let completed=0,failed=0;
+ log("  FF FULL ROSTER: "+om.length+" opponents + "+sm.length+" SoT; 15-minute activity, "+activityDays+" days");
+ for(let i=0;i<priority.length;i++){
+  const m=priority[i],id=Number(m.id),side=i<om.length?"opponent":"sot";
+  log("  FF activity "+(i+1)+"/"+priority.length+" ["+side+"] "+m.name);
+  const act=await ffOptional("/activity/player?target="+id+"&start="+deepStart+"&end="+deepEnd+"&bucket=900",ffkey,m.name+" activity");
+  let hist={ok:false,error:"not requested (outside stat-history priority)"};
+  if((side==="opponent"?topOpp:topSot).has(id))hist=await ffOptional("/get-stats-history?target="+id+"&limit=100&sort=desc",ffkey,m.name+" stat history");
+  playerDeep[id]={id,name:m.name,side,activity_15m:act,stats_history_6h:hist};
+  if(act.ok)completed++;else failed++;
+  if(i+1<priority.length)await sleep(1500);
+ }
+ log("  FF full roster activity complete: "+completed+" succeeded, "+failed+" failed");
+ const end=Math.floor(Date.now()/1000),start=end-14*86400;
+ const oppActivity=await ffOptional(`/activity/faction?faction_id=${theirs}&start=${start}&end=${end}&bucket=3600`,ffkey,"Opponent 14d hourly activity");
+ const sotActivity=await ffOptional(`/activity/faction?faction_id=${ours}&start=${start}&end=${end}&bucket=3600`,ffkey,"SoT 14d hourly activity");
+ let flights={ok:false,error:"not requested"};
+ try{flights=await ffOptional(`/player-flights/batch?targets=${oi.join(",")}`,ffkey,"Opponent current flights")}catch(e){flights={ok:false,error:e.message}}
+ return{enabled:true,key_status:keyStatus,activity:{opponent_14d_hourly:oppActivity,sot_14d_hourly:sotActivity,player_deep:playerDeep,player_deep_count:priority.length,player_activity_success:completed,player_activity_failed:failed,player_activity_days:activityDays},flights,opponent:{faction_id:theirs,requested:oi.length,received:os.length,members:om.map(m=>({id:m.id,name:m.name,level:m.level,ffscouter:o[String(m.id)]||null}))},sot:{faction_id:ours,requested:si.length,received:ss.length,members:sm.map(m=>({id:m.id,name:m.name,level:m.level,ffscouter:s[String(m.id)]||null}))}};
+}
+
+
+let deepBaseline=null,baselineIndex=new Map();
+function num(v){const n=Number(v);return Number.isFinite(n)?n:null}
+function ffEstimate(row){
+ const f=row?.ffscouter||row||{};
+ const vals=[f.bs_estimate,f.battle_stats,f.battlestats,f.total,f.estimate,f?.premium?.estimate,f?.premium_estimate].map(num).filter(x=>x>0);
+ return vals.length?Math.max(...vals):null;
+}
+function indexBaseline(data){
+ const idx=new Map(),oppId=Number(data?.exporter?.opponent_faction_id||0);
+ const ff=data?.ffscouter?.opponent?.members||[];
+ for(const m of ff){const id=Number(m.id||m.player_id);if(!id)continue;const x=idx.get(id)||{id,name:m.name,ff_estimate:null,kal:false,kal_loadouts:0,hist_hits:0,hist_score:0,hist_wars:0,activity_ratio:null,activity_intensity:null,activity_samples:0,stat_growth:null,stat_history_samples:0,stat_history_window_seconds:null};x.name=x.name||m.name;x.ff_estimate=ffEstimate(m);idx.set(id,x)}
+ for(const m of data?.kal?.members||[]){const id=Number(m.id);if(!id)continue;const x=idx.get(id)||{id,name:m.name,ff_estimate:null,kal:false,kal_loadouts:0,hist_hits:0,hist_score:0,hist_wars:0};x.kal=m.status==="ok"&&(m.loadouts||[]).length>0;x.kal_loadouts=(m.loadouts||[]).length;idx.set(id,x)}
+ const reports=data?.ranked_war_reports||{};
+ for(const wrap of Object.values(reports)){
+  const d=wrap?.data||wrap;if(!d)continue;
+  const candidates=[d.members,d.participants,d.factions].filter(Boolean);
+  const walk=v=>{if(Array.isArray(v)){for(const z of v)walk(z);return}if(!v||typeof v!=="object")return;
+   const id=Number(v.id??v.user_id??v.player_id??v.member_id??0),hits=num(v.attacks??v.hits??v.war_hits),score=num(v.score??v.respect??v.respect_gain);
+   if(id&&idx.has(id)&&(hits!==null||score!==null)){const x=idx.get(id);if(hits!==null)x.hist_hits+=hits;if(score!==null)x.hist_score+=score;x.hist_wars+=1}
+   for(const z of Object.values(v))if(z&&typeof z==="object")walk(z);
+  };for(const c of candidates)walk(c);
+ }
+ for(const [id0,d] of Object.entries(data?.ffscouter?.activity?.player_deep||{})){const x=idx.get(Number(id0));if(!x)continue;const raw=d?.activity_15m?.data,buckets=raw?.buckets||[];if(buckets.length){const scores=buckets.map(b=>Math.max(0,Number(b.activity_score||0))),active=scores.filter(v=>v>0).length;x.activity_ratio=active/buckets.length;x.activity_intensity=scores.reduce((a,b)=>a+b,0)/buckets.length;x.activity_samples=buckets.length}const hr=d?.stats_history_6h?.data,h=hr?.history||[];if(h.length>=2){const newest=Number(h[0]?.bs_estimate||0),oldest=Number(h[h.length-1]?.bs_estimate||0);if(newest>0&&oldest>0){x.stat_growth=(newest-oldest)/oldest;x.stat_history_samples=h.length;x.stat_history_window_seconds=Number(hr?.bucket_window_seconds||21600)}}}
+ // More reliable historical aggregation from attack logs.
+ for(const w of Object.values(data?.attacks_by_war||{})){const seen=new Set();for(const a of w?.matchup_attacks||w?.attacks||[]){const af=attackFactionId(a.attacker),ap=attackPlayerId(a.attacker);if(af!==oppId||!idx.has(ap))continue;const x=idx.get(ap);x.hist_hits++;x.hist_score+=Number(a.respect_gain||0);seen.add(ap)}for(const id of seen)idx.get(id).hist_wars++}
+ return idx;
+}
+$("baselineFile").addEventListener("change",async ev=>{
+ const f=ev.target.files?.[0];if(!f)return;
+ try{deepBaseline=JSON.parse(await f.text());baselineIndex=indexBaseline(deepBaseline);const withFF=[...baselineIndex.values()].filter(x=>x.ff_estimate).length,withKAL=[...baselineIndex.values()].filter(x=>x.kal).length;
+ $("baselineState").innerHTML=`<b>Baseline loaded ✓</b> — ${baselineIndex.size} opponents indexed · FF ${withFF} · KAL ${withKAL} · historical war production seeded`;
+ }catch(e){deepBaseline=null;baselineIndex=new Map();$("baselineState").innerHTML="<b>Baseline failed:</b> "+e.message}
+});
+let liveTimer=null,liveRunning=false,liveStore=null,liveSeenAttacks=new Set();
+function nowSec(){return Math.floor(Date.now()/1000)}
+function getRankedWar(data,warId){
+ const rw=data?.wars?.ranked||data?.data?.wars?.ranked;
+ if(rw&&Number(rw.war_id)===Number(warId))return rw;
+ const arr=data?.rankedwars||data?.data?.rankedwars||[];
+ return arr.find(w=>Number(w.id)===Number(warId))||null;
+}
+function memberState(m){return{id:m.id,name:m.name,level:m.level,last_action:m.last_action||null,status:m.status||null,revive_setting:m.revive_setting??null,is_revivable:m.is_revivable??null}}
+function scoreSide(w,id){const f=(w?.factions||[]).find(x=>Number(x.id)===Number(id));return f?{score:Number(f.score||0),chain:Number(f.chain||0)}:{score:0,chain:0}}
+function velocity(minutes,ours,theirs){
+ if(!liveStore||liveStore.snapshots.length<2)return null;
+ const cur=liveStore.snapshots.at(-1),cut=cur.timestamp-minutes*60;
+ let old=liveStore.snapshots[0];for(const x of liveStore.snapshots){if(x.timestamp<=cut)old=x;else break}
+ const hrs=Math.max((cur.timestamp-old.timestamp)/3600,1/60);
+ return{window_minutes:minutes,sot_per_hour:(cur.score.sot-old.score.sot)/hrs,opponent_per_hour:(cur.score.opponent-old.score.opponent)/hrs};
+}
+function liveRecommendation(sot,opp,target){
+ const v=velocity(15);if(!v)return"COLLECTING BASELINE";
+ const lead=sot-opp;
+ if(v.opponent_per_hour>v.sot_per_hour*1.35&&lead<target*.12)return"SUPPRESS";
+ if(sot>=target*.85&&lead>target*.15)return"PUSH";
+ if(lead<0&&v.sot_per_hour<v.opponent_per_hour)return"SUPPRESS";
+ if(lead>target*.2&&v.opponent_per_hour>v.sot_per_hour)return"HOLD";
+ return"PUSH";
+}
+
+function attackPlayerId(side){return Number(side?.id??side?.player?.id??side?.player_id??0)}
+function attackFactionId(side){return Number(side?.faction?.id??side?.faction_id??0)}
+function attackResult(a){return String(a?.result||a?.outcome||"").toLowerCase()}
+function successfulAttack(a){const r=attackResult(a);return !["lost","stalemate","escape","assist","interrupted"].some(x=>r.includes(x))}
+function suppressionLifecycle(){
+ const snaps=liveStore?.snapshots||[],out={};
+ for(let i=1;i<snaps.length;i++){const prev=new Map((snaps[i-1].opponent_members||[]).map(x=>[Number(x.id),x]));for(const m of snaps[i].opponent_members||[]){const id=Number(m.id),p=prev.get(id);if(!p)continue;const row=out[id]||(out[id]={id,name:m.name,hosp_entries:0,returns:[],revives:0,revive_settings:[],revivable_states:[]}),ps=String(p.status?.state||""),cs=String(m.status?.state||"");if(!/hospital/i.test(ps)&&/hospital/i.test(cs))row.hosp_entries++;if(/hospital/i.test(ps)&&!/hospital/i.test(cs))row.returns.push(Math.max(0,snaps[i].timestamp-snaps[i-1].timestamp));if(m.revive_setting!=null&&!row.revive_settings.includes(String(m.revive_setting)))row.revive_settings.push(String(m.revive_setting));if(m.is_revivable!=null&&!row.revivable_states.includes(String(m.is_revivable)))row.revivable_states.push(String(m.is_revivable))}}
+ for(const rv of liveStore?.revives||[]){const id=Number(rv.target?.id??rv.target_id??0);if(!id)continue;const row=out[id]||(out[id]={id,name:rv.target?.name||"",hosp_entries:0,returns:[],revives:0,revive_settings:[],revivable_states:[]});row.revives++}
+ return Object.values(out).map(x=>{const a=[...x.returns].sort((a,b)=>a-b);return{...x,median_observed_return_seconds:a.length?a[Math.floor(a.length/2)]:null}});
+}
+function respectGain(a){return Math.max(0,Number(a?.respect_gain??a?.respect??0))}
+function personalizedTargets(ours,theirs,rows,matchups){
+ const cur=liveStore?.snapshots?.at(-1),sot=cur?.sot_members||[],byOpp=new Map(rows.map(x=>[x.id,x])),out={};
+ for(const m of sot){const sid=Number(m.id),list=[];for(const p of rows){if(p.classification==="UNAVAILABLE")continue;const mm=matchups.find(x=>x.sot_id===sid&&x.opponent_id===p.id);const attempts=mm?.attempts||0,wins=mm?.wins||0;let prior=.82;
+   const sotBase=(deepBaseline?.ffscouter?.sot?.members||[]).find(x=>Number(x.id)===sid),sotFF=ffEstimate(sotBase),oppFF=Number(p.baseline?.ff_estimate||0);
+   if(sotFF>0&&oppFF>0){const ratio=sotFF/oppFF;prior=Math.max(.08,Math.min(.98,.5+Math.log10(ratio)*.28))}
+   const winProb=attempts?(wins+prior*3)/(attempts+3):prior;
+   const ownRespect=liveStore.attacks.filter(a=>attackFactionId(a.attacker)===ours&&attackPlayerId(a.attacker)===sid&&attackPlayerId(a.defender)===p.id&&successfulAttack(a)).map(respectGain).filter(x=>x>0);
+   const factionRespect=liveStore.attacks.filter(a=>attackFactionId(a.attacker)===ours&&attackPlayerId(a.defender)===p.id&&successfulAttack(a)).map(respectGain).filter(x=>x>0);
+   const historicalRespect=[];for(const w of Object.values(deepBaseline?.attacks_by_war||{}))for(const a of w?.matchup_attacks||[]){if(attackFactionId(a.attacker)===ours&&attackPlayerId(a.defender)===p.id&&successfulAttack(a)){const rg=respectGain(a);if(rg>0)historicalRespect.push(rg)}}
+   const avg=a=>a.length?a.reduce((x,y)=>x+y,0)/a.length:null;
+   const ownAvg=avg(ownRespect),factionAvg=avg(factionRespect),histAvg=avg(historicalRespect);
+   const fallback=Math.max(.5,Math.min(15,(p.level||1)/8));
+   const expectedRespect=ownAvg??factionAvg??histAvg??fallback;
+   const respectSource=ownAvg!=null?"personal live":factionAvg!=null?"SoT live":histAvg!=null?"SoT historical":"level fallback";
+   const value=winProb*expectedRespect,confidence=Math.min(100,20+attempts*15+(sotFF&&oppFF?25:0)+(ownRespect.length?30:factionRespect.length?22:historicalRespect.length?14:0));
+   list.push({opponent_id:p.id,name:p.name,win_probability:winProb,expected_respect:expectedRespect,respect_source:respectSource,respect_samples:ownRespect.length||factionRespect.length||historicalRespect.length,expected_value_per_25e:value,attempts,wins,confidence,classification:p.classification});
+  }out[sid]={sot_id:sid,name:m.name,targets:list.sort((a,b)=>b.expected_value_per_25e-a.expected_value_per_25e).slice(0,8)}}
+ return out;
+}
+function buildCommandIntel(ours,theirs){
+ const snaps=liveStore?.snapshots||[],attacks=liveStore?.attacks||[],cur=snaps.at(-1);if(!cur)return null;
+ const opponents=new Map((cur.opponent_members||[]).map(m=>[Number(m.id),{id:Number(m.id),name:m.name,level:m.level,status:m.status,last_action:m.last_action,hits:0,scoreish:0,sotWins:0,sotLosses:0}]));
+ const matchups={},outside=[];
+ for(const a of attacks){
+  const af=attackFactionId(a.attacker),df=attackFactionId(a.defender),ap=attackPlayerId(a.attacker),dp=attackPlayerId(a.defender);
+  const internal=(af===ours&&df===theirs)||(af===theirs&&df===ours);
+  if((af===ours||df===ours||af===theirs||df===theirs)&&!internal)outside.push({id:aid(a),ended:ended(a),attacker:a.attacker,defender:a.defender,result:a.result,respect_gain:a.respect_gain??null});
+  if(af===theirs&&opponents.has(ap)){const p=opponents.get(ap);p.hits++;p.scoreish+=Number(a.respect_gain||0)}
+  if(internal&&af===ours&&opponents.has(dp)){const k=ap+"-"+dp,m=matchups[k]||(matchups[k]={sot_id:ap,opponent_id:dp,attempts:0,wins:0,losses:0});m.attempts++;if(successfulAttack(a)){m.wins++;opponents.get(dp).sotWins++}else{m.losses++;opponents.get(dp).sotLosses++}}
+ }
+ const rows=[...opponents.values()].map(p=>{
+  const st=String(p.status?.state||""),la=String(p.last_action?.status||""),unavailable=/hospital|travel|abroad|jail|fallen/i.test(st),active=/online|idle/i.test(la);
+  const base=baselineIndex.get(p.id)||{},histRate=base.hist_wars?base.hist_score/base.hist_wars:0,ff=Math.max(0,Number(base.ff_estimate||0)),ffTier=ff?Math.min(30,Math.max(0,Math.log10(ff)-4)*7):0;
+  const activityPrior=base.activity_ratio==null?0:Math.min(16,base.activity_ratio*45),growthPrior=base.stat_growth==null?0:Math.min(8,Math.max(0,base.stat_growth*40));
+  const threat=Math.min(100,p.hits*7+(active?18:0)+(p.level||0)*.18+Math.min(28,histRate/18)+ffTier+(base.kal?3:0)+activityPrior+growthPrior);
+  const suppress=Math.min(100,p.hits*9+(active?20:0)+(p.scoreish*2)+Math.min(30,histRate/14));
+  const strengthPenalty=ff?Math.min(55,Math.max(0,Math.log10(ff)-4)*12):Math.max(0,(p.level||0)-35)*.7;
+  const farm=Math.max(0,Math.min(100,(active?28:8)+(unavailable?-55:25)+30-strengthPenalty+(p.sotWins*4)-(p.sotLosses*14)-Math.min(20,histRate/25)));
+  const classification=unavailable?"UNAVAILABLE":suppress>=55?"SUPPRESS":farm>=55?"FARM":threat>=45?"DANGEROUS":"WATCH";
+  const why=[];if(p.hits)why.push(p.hits+" live hits captured");if(active)why.push(la);if(unavailable)why.push(st);if(p.sotWins||p.sotLosses)why.push(p.sotWins+" SoT wins / "+p.sotLosses+" losses");if(base.ff_estimate)why.push("FF est "+Math.round(base.ff_estimate).toLocaleString());if(base.kal)why.push("KAL "+base.kal_loadouts+" loadout"+(base.kal_loadouts===1?"":"s"));if(base.hist_wars)why.push("hist "+base.hist_score.toFixed(1)+" score / "+base.hist_hits+" hits");if(base.activity_ratio!=null)why.push("FF activity "+Math.round(base.activity_ratio*100)+"% of "+(base.activity_samples||0)+" 15m buckets");if(base.stat_growth!=null)why.push("stat trend "+(base.stat_growth>=0?"+":"")+Math.round(base.stat_growth*100)+"%");
+  return{...p,baseline:base,threat:Math.round(threat),farm:Math.round(farm),suppress:Math.round(suppress),classification,why:why.join(" · ")||"live baseline only"};
+ }).sort((a,b)=>b.suppress-a.suppress||b.threat-a.threat);
+ const matchupRows=Object.values(matchups);return{opponent_faction_id:theirs,rows,matchups:matchupRows,personalized_targets:personalizedTargets(ours,theirs,rows,matchupRows),outside_activity:outside,suppression_lifecycle:suppressionLifecycle()};
+}
+function renderCommandBoard(intel){
+ if(!intel)return;
+ const sid=Number($("targetMemberId")?.value||0),pt=intel.personalized_targets?.[sid]?.targets||[];
+ const targetHtml=pt.length?pt.slice(0,8).map((x,i)=>"<div style=\"padding:7px 0;border-bottom:1px solid #222\"><b>#"+(i+1)+" "+x.name+"</b> — EV "+x.expected_value_per_25e.toFixed(2)+" score/25E · win "+Math.round(x.win_probability*100)+"% · respect "+x.expected_respect.toFixed(2)+"<br><small>"+x.attempts+" personal attempts · respect source: "+x.respect_source+" ("+x.respect_samples+" samples) · confidence "+Math.round(x.confidence)+"%</small></div>").join(""):"<small>Collecting matchup evidence / check member ID.</small>";
+ const sup=intel.rows.filter(x=>x.classification==="SUPPRESS").slice(0,5),farm=intel.rows.filter(x=>x.classification==="FARM").sort((a,b)=>b.farm-a.farm).slice(0,8);
+ const fmt=(arr,type)=>arr.length?arr.map(x=>`<div style="padding:7px 0;border-bottom:1px solid #222"><b>${x.name}</b> — ${type==="farm"?"Farm "+x.farm:"Suppress "+x.suppress+" / Threat "+x.threat}<br><small>${x.why}</small></div>`).join(""):"<small>None yet — collecting evidence.</small>";
+ $("commandBoard").innerHTML=`<div class="card" style="margin:0 0 12px"><b>⚔ BEST EXPECTED-VALUE TARGETS</b><div>${targetHtml}</div></div><div class="row"><div class="card" style="margin:0"><b>🎯 FARM BOARD</b>${fmt(farm,"farm")}</div><div class="card" style="margin:0"><b>☠ SUPPRESSION BOARD</b>${fmt(sup,"sup")}</div></div><div class="card" style="margin:12px 0 0"><b>🚨 OUTSIDE ACTIVITY REVIEW</b><div>${intel.outside_activity.length} captured attack(s) involving either war faction and a third party. Review evidence manually; this is not an automatic violation finding.</div></div><div class="card" style="margin:12px 0 0"><b>💉 REVIVE / SUPPRESSION INTEL</b><div>${intel.suppression_lifecycle.filter(x=>x.hosp_entries||x.revives).slice(0,10).map(x=>"<div style=\"padding:6px 0\"><b>"+x.name+"</b> — hosp "+x.hosp_entries+" · revives "+x.revives+(x.median_observed_return_seconds!=null?" · observed return ~"+Math.round(x.median_observed_return_seconds/60)+"m":"")+(x.revive_settings.length?" · revive setting "+x.revive_settings.join("/"):"")+"</div>").join("")||"<small>Collecting hospital/revive transitions.</small>"}</div></div>`;
+}
+function runWarSimulation(){
+ if(!deepBaseline||!baselineIndex.size){alert("Load a Deep Scan baseline JSON first. v7.9 simulation uses your real baseline.");return}
+ const ours=Number($("ours").value)||Number(deepBaseline?.exporter?.sot_faction_id)||41259,theirs=Number($("theirs").value)||Number(deepBaseline?.exporter?.opponent_faction_id)||0,sid=Number($("targetMemberId").value)||4315564,t0=nowSec()-900;
+ const oppSrc=deepBaseline?.core?.opponent_members?.data?.members||deepBaseline?.ffscouter?.opponent?.members||[];
+ const sotSrc=deepBaseline?.core?.sot_members?.data?.members||deepBaseline?.ffscouter?.sot?.members||[];
+ const norm=(m,online=true)=>({id:Number(m.id||m.player_id),name:m.name||("Player "+(m.id||m.player_id)),level:Number(m.level||0),last_action:{status:online?"Online":"Idle"},status:{state:"Okay"},is_revivable:true});
+ const opp=oppSrc.map((m,i)=>norm(m,i%4!==3)).filter(x=>x.id),sot=sotSrc.map(m=>norm(m,true)).filter(x=>x.id);
+ if(!opp.length||!sot.length){alert("Baseline is missing faction member rosters. Run a fresh Deep Scan and load that JSON.");return}
+ const actor=sot.some(x=>x.id===sid)?sid:sot[0].id;$("targetMemberId").value=actor;
+ const ranked=[...opp].sort((a,b)=>{const A=baselineIndex.get(a.id)||{},B=baselineIndex.get(b.id)||{};return (Number(B.hist_score||0)/(Number(B.hist_wars)||1)+Math.log10(Number(B.ff_estimate||1))*8)-(Number(A.hist_score||0)/(Number(A.hist_wars)||1)+Math.log10(Number(A.ff_estimate||1))*8)});
+ const sample=ranked.slice(0,Math.min(10,ranked.length)),side=(id,ff)=>({id,faction:{id:ff}}),attacks=[];
+ const hitters=sot.slice(0,Math.min(4,sot.length)).map(x=>x.id);let seq=1;
+ for(let i=0;i<sample.length;i++){const p=sample[i],base=baselineIndex.get(p.id)||{},respect=Math.max(.5,Math.min(15,Number(base.hist_wars)?Number(base.hist_score)/(Math.max(1,Number(base.hist_hits))):Number(p.level||1)/8));const hitter=hitters[i%hitters.length]||actor;attacks.push({id:"sim"+seq++,attacker:side(hitter,ours),defender:side(p.id,theirs),result:"Hospitalized",respect_gain:respect,ended:t0+60+i*35});if(i===2)attacks.push({id:"sim"+seq++,attacker:side(actor,ours),defender:side(p.id,theirs),result:"Lost",respect_gain:0,ended:t0+75+i*35})}
+ if(sample[0])attacks.push({id:"outside-sim",attacker:{id:777777,faction:{id:777}},defender:side(sample[0].id,theirs),result:"Hospitalized",respect_gain:4,ended:t0+400});
+ const reviveTarget=sample[1]||sample[0],snap=(ts,phase)=>({timestamp:ts,score:{sot:100+phase*55,opponent:90+phase*38,target:7500},opponent_members:opp.map(x=>({...x,status:{state:reviveTarget&&x.id===reviveTarget.id&&phase===1?"Hospital":"Okay"},revive_setting:reviveTarget&&x.id===reviveTarget.id?"Everyone":null})),sot_members:sot});
+ liveStore={exporter:{name:"BASELINE SIMULATION",version:"7.8",baseline_driven:true},war_id:"SIM",sot_faction_id:ours,opponent_faction_id:theirs,snapshots:[snap(t0,0),snap(t0+300,1),snap(t0+600,2),snap(t0+900,3)],attacks,revives:reviveTarget?[{id:"sim-revive",timestamp:t0+580,target:{id:reviveTarget.id,name:reviveTarget.name},reviver:{id:12345,name:"SimMedic"}}]:[],derived:{}};
+ const intel=buildCommandIntel(ours,theirs);liveStore.derived.command_intel=intel;renderCommandBoard(intel);const pt=intel.personalized_targets?.[actor]?.targets||[];
+ $("liveSummary").innerHTML="<b>🧪 BASELINE-DRIVEN SIMULATION</b> — real Deep Scan roster/intel + fabricated live events; no Torn requests made.<br>Member: <b>"+(sot.find(x=>x.id===actor)?.name||actor)+"</b> · Opponents: "+opp.length+" · Simulated attacks: "+attacks.length+" · Top EV target: <b>"+(pt[0]?.name||"none")+"</b>";
+ log("\n🧪 Baseline sim complete — "+opp.length+" real opponents, "+attacks.length+" synthetic live attacks, top EV target "+(pt[0]?.name||"none")+".");
+}
+$("simWar").onclick=runWarSimulation;
+async function liveSnapshot(){
+ if(!liveRunning)return;
+ const key=$("key").value.trim(),ours=Number($("ours").value),theirs=Number($("theirs").value),warId=Number($("liveWarId").value);
+ try{
+  log("\n🔴 LIVE snapshot starting...");
+  const warRaw=await req(`/faction/${ours}/wars`,key),war=getRankedWar(warRaw,warId);
+  if(!war)throw Error("Active ranked war not found for War ID "+warId);
+  const om=await req(`/faction/${theirs}/members?striptags=true`,key),sm=await req(`/faction/${ours}/members?striptags=true`,key);
+  let revives={revives:[]};try{revives=await req(`/faction/revives?limit=100&sort=ASC&from=${Math.max(Number(war.start||0),liveStore?.last_revive_ts||0)}&to=${nowSec()}`,key)}catch(e){log("  Revive feed unavailable: "+e.message)}
+  const newRevives=[];for(const rv of revives.revives||[]){const rid=String(rv.id??rv.timestamp+"-"+(rv.reviver?.id||"")+"-"+(rv.target?.id||""));if(!liveStore.seen_revives[rid]){liveStore.seen_revives[rid]=1;newRevives.push(rv)}liveStore.last_revive_ts=Math.max(liveStore.last_revive_ts||0,Number(rv.timestamp||rv.revived||0))}liveStore.revives.push(...newRevives);
+  const from=liveStore?.last_attack_ts||Math.max(Number(war.start||0),nowSec()-7200),to=nowSec();
+  const atk=await req(`/faction/attacksfull?limit=1000&sort=ASC&from=${from}&to=${to}`,key);
+  const raw=atk.attacks||[],newAttacks=[];
+  for(const a of raw){const id=aid(a);if(!liveSeenAttacks.has(id)){liveSeenAttacks.add(id);newAttacks.push(a)}liveStore.last_attack_ts=Math.max(liveStore.last_attack_ts||0,ended(a)||0)}
+  const os=scoreSide(war,ours),rs=scoreSide(war,theirs),snap={timestamp:nowSec(),captured_at:new Date().toISOString(),score:{sot:os.score,opponent:rs.score,target:Number(war.target||0),sot_chain:os.chain,opponent_chain:rs.chain},opponent_members:(om.members||[]).map(memberState),sot_members:(sm.members||[]).map(memberState),new_attack_ids:newAttacks.map(a=>aid(a)),new_revive_count:newRevives.length};
+  liveStore.snapshots.push(snap);liveStore.attacks.push(...newAttacks);
+  const v5=velocity(5),v15=velocity(15),rec=liveRecommendation(os.score,rs.score,Number(war.target||7500));
+  const commandIntel=buildCommandIntel(ours,theirs);
+  liveStore.derived={updated_at:snap.captured_at,recommendation:rec,velocity_5m:v5,velocity_15m:v15,total_attacks_captured:liveStore.attacks.length,total_revives_captured:liveStore.revives.length,command_intel:commandIntel};
+  renderCommandBoard(commandIntel);
+  $("liveSummary").innerHTML=`<b>${rec}</b> — SoT ${os.score.toLocaleString()} vs Opponent ${rs.score.toLocaleString()} / ${Number(war.target||0).toLocaleString()}<br>Snapshots: ${liveStore.snapshots.length} · New attacks this pass: ${newAttacks.length} · Total attacks: ${liveStore.attacks.length} · Revives: ${liveStore.revives.length}${v15?`<br>15m pace: SoT ${v15.sot_per_hour.toFixed(0)}/hr · Opponent ${v15.opponent_per_hour.toFixed(0)}/hr`:""}`;
+  log(`✓ LIVE: SoT ${os.score} / Opponent ${rs.score}; +${newAttacks.length} attacks; recommendation ${rec}`);
+ }catch(e){log("⚠ LIVE snapshot: "+e.message)}
+}
+function exportLive(){
+ if(!liveStore)return;const clean=sanitizeCredentialEchoes(liveStore),blob=new Blob([JSON.stringify(clean,null,2)],{type:"application/json"}),a=document.createElement("a");
+ a.href=URL.createObjectURL(blob);a.download=`SoT_War_${liveStore.war_id}_LIVE_${new Date().toISOString().replace(/[:.]/g,"-")}.json`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+}
+$("liveStart").onclick=async()=>{
+ const key=$("key").value.trim();if(!key)return alert("Paste the Torn API key first.");if(liveRunning)return;
+ DELAY=Math.max(700,Math.min(5000,Number($("delay").value)||1100));
+ const mins=Math.max(2,Math.min(60,Number($("liveMinutes").value)||5)),ours=Number($("ours").value),theirs=Number($("theirs").value),warId=Number($("liveWarId").value);
+ liveStore={exporter:{name:"Cloudy's SoT Live War Watch",version:"7.6",api_key_included:false,deep_scan_baseline_loaded:!!deepBaseline},war_id:warId,sot_faction_id:ours,opponent_faction_id:theirs,started_at:new Date().toISOString(),interval_minutes:mins,last_attack_ts:0,last_revive_ts:0,seen_revives:{},snapshots:[],attacks:[],revives:[],derived:{}};
+ liveSeenAttacks=new Set();liveRunning=true;$("liveStart").disabled=true;$("liveStop").disabled=false;
+ await liveSnapshot();liveTimer=setInterval(liveSnapshot,mins*60000);
+};
+$("liveStop").onclick=()=>{if(liveTimer)clearInterval(liveTimer);liveTimer=null;liveRunning=false;$("liveStart").disabled=false;$("liveStop").disabled=true;if(liveStore){liveStore.stopped_at=new Date().toISOString();exportLive()}log("\n■ Live War Watch stopped and exported.");};
+$("go").onclick=async()=>{
+ const key=$("key").value.trim(),ffkey=$("ffkey").value.trim(),kalkey=$("kalkey").value.trim(),ours=Number($("ours").value),theirs=Number($("theirs").value),n=Math.max(1,Math.min(20,Number($("warCount").value)||6));DELAY=Math.max(700,Math.min(5000,Number($("delay").value)||1100));const kh=Math.max(1,Math.min(10,Number($("kalHistory").value)||3));KAL_DELAY=Math.max(250,Math.min(5000,Number($("kalDelay").value)||500));if(!key)return alert("Paste an API key.");$("go").disabled=true;$("status").textContent="";reqNo=0;lastReq=0;kalReqNo=0;kalLastReq=0;
+ try{log(`v6.3 War Room deep scan started. Torn delay ${DELAY}ms; KAL delay ${KAL_DELAY}ms.`);const core={},specs=[["sot_basic",`/faction/${ours}/basic?striptags=true`],["sot_members",`/faction/${ours}/members?striptags=true`],["sot_wars",`/faction/${ours}/wars`],["sot_rankedwars",`/faction/${ours}/rankedwars?limit=100`],["opponent_basic",`/faction/${theirs}/basic?striptags=true`],["opponent_members",`/faction/${theirs}/members?striptags=true`],["opponent_wars",`/faction/${theirs}/wars`],["opponent_rankedwars",`/faction/${theirs}/rankedwars?limit=100`]];for(const[name,path]of specs)core[name]=await opt(path,key,name);
+ const selected=new Map(),addSide=(k,s)=>{if(!core[k]?.ok)return;for(const w of wars(core[k].data).filter(w=>Number(w.end)>0).slice(0,n))if(w?.id&&!selected.has(Number(w.id)))selected.set(Number(w.id),{...w,selected_from:s})};addSide("opponent_rankedwars","opponent");addSide("sot_rankedwars","sot");log(`\nSelected ${selected.size} completed wars.`);
+ const ffscouter=await collectFFIntel(ffkey,core,ours,theirs),kal=await collectKALIntel(kalkey,core,theirs,kh);log("\nPulling ranked war reports...");const reports={};for(const[id]of selected)reports[id]=await opt(`/faction/${id}/rankedwarreport`,key,`ranked war report ${id}`);
+ log("\nBulk attack history: /faction/attacksfull limit=1000");const attacksByWar={};let idx=0;for(const[id,w]of selected){idx++;const start=Number(w.start),stop=Number(w.end),ids=(w.factions||[]).map(f=>Number(f.id));log(`\n[${idx}/${selected.size}] War ${id}`);if(!start||!stop){attacksByWar[id]={ok:false,error:"Missing completed-war timestamps"};continue}const bulk=await bulkWindow(start,stop,key,`war ${id}`);attacksByWar[id]={war_id:id,selected_from:w.selected_from,start,end:stop,faction_ids:ids,ok:bulk.ok,pages:bulk.pages,errors:bulk.errors,attacks:bulk.attacks,matchup_attacks:bulk.attacks.filter(a=>ids.length>=2&&matchup(a,ids[0],ids[1]))}}
+ const support={sot_chain:await opt(`/faction/${ours}/chain`,key,"SoT current chain"),opponent_chain:await opt(`/faction/${theirs}/chain`,key,"Opponent current chain"),sot_chains:await opt(`/faction/${ours}/chains?limit=100&sort=DESC`,key,"SoT chain history"),opponent_chains:await opt(`/faction/${theirs}/chains?limit=100&sort=DESC`,key,"Opponent chain history")};
+ const out={exporter:{name:"Cloudy's War Intel Exporter",version:"6.3",mode:"prewar-deep+ffscouter-premium+kal-loadouts-bridge",exported_at:new Date().toISOString(),sot_faction_id:ours,opponent_faction_id:theirs,completed_wars_requested_per_faction:n,request_delay_ms:DELAY,api_key_included:false,ffscouter_key_included:false,kal_key_included:false,kal_history_limit:kh,kal_request_delay_ms:KAL_DELAY},core,ffscouter,kal,...support,ranked_war_reports:reports,attacks_by_war:attacksByWar};
+ const blob=new Blob([JSON.stringify(out,null,2)],{type:"application/json"}),a=document.createElement("a");a.href=URL.createObjectURL(blob);a.download=`SoT_DEEP_War_Intel_v6_3_FF_KAL_${ours}_vs_${theirs}_${new Date().toISOString().replace(/[:.]/g,"-")}.json`;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),1000);log(`\n✓ DONE — ${reqNo} Torn requests + ${kalReqNo} KAL requests. Upload the v6.3 JSON here.`);
+ }catch(e){log(`\n✗ ${e.message}`)}finally{$("go").disabled=false}
+};
+</script></body></html>
